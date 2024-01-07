@@ -50,6 +50,20 @@ interface WorkerInput {
     ihashLockP2TR: any;
 }
 
+function reverseBuffer(buffer) {
+    return Buffer.from(buffer).reverse();
+  }
+
+  
+function addInputCvt(inputData, transaction) {
+    // 如果 hash 是一个字符串，则将其转换为反序的 Buffer
+    const txidBuffer = typeof inputData.hash === 'string' 
+        ? reverseBuffer(Buffer.from(inputData.hash, 'hex')) 
+        : inputData.hash;
+    // 添加输入到交易
+    transaction.addInput(txidBuffer, inputData.index, inputData.sequence);
+}
+
 // This is the worker's message event listener
 if (parentPort) {
     parentPort.on("message", async (message: WorkerInput) => {
@@ -105,6 +119,7 @@ if (parentPort) {
         const expectedFee =
             fees.commitFeeOnly +
             (workerOptions.satsbyte as any) * OUTPUT_BYTES_BASE;
+        // console.log('expectedFee', expectedFee);
         const differenceBetweenCalculatedAndExpected =
             calculatedFee - expectedFee;
         if (
@@ -125,9 +140,6 @@ if (parentPort) {
 
         // Start mining loop, terminates when a valid proof of work is found or stopped manually
         do {
-            // Introduce a minor delay to avoid overloading the CPU
-            await sleep(0);
-
             // This worker has tried all assigned sequence range but it did not find solution.
             if (sequence > seqEnd) {
                 finalSequence = -1;
@@ -141,34 +153,53 @@ if (parentPort) {
                 );
             }
 
-            // Create a new PSBT (Partially Signed Bitcoin Transaction)
-            let psbtStart = new Psbt({ network: NETWORK });
-            psbtStart.setVersion(1);
+            // // Create a new PSBT (Partially Signed Bitcoin Transaction)
+            // let psbtStart = new Psbt({ network: NETWORK });
+            // psbtStart.setVersion(1);
 
-            // Add input and output to PSBT
-            psbtStart.addInput({
+            // // Add input and output to PSBT
+            // psbtStart.addInput({
+            //     hash: fundingUtxo.txid,
+            //     index: fundingUtxo.index,
+            //     sequence: sequence,
+            //     tapInternalKey: tabInternalKey,
+            //     witnessUtxo: witnessUtxo,
+            // });
+            // psbtStart.addOutput(fixedOutput);
+
+            // // Add change output if needed
+            // if (needChangeFeeOutput) {
+            //     psbtStart.addOutput({
+            //         address: fundingKeypair.address,
+            //         value: differenceBetweenCalculatedAndExpected,
+            //     });
+            // }
+            
+            // psbtStart.signInput(0, fundingKeypair.tweakedChildNode);
+            // psbtStart.finalizeAllInputs();
+            
+            // // Extract the transaction and get its ID
+            // prelimTx = psbtStart.extractTransaction();
+            // const checkTxid = prelimTx.getId();
+
+            let tx = new bitcoin.Transaction();
+            tx.version = 1;
+            // 添加输入
+            addInputCvt({
                 hash: fundingUtxo.txid,
                 index: fundingUtxo.index,
                 sequence: sequence,
                 tapInternalKey: tabInternalKey,
                 witnessUtxo: witnessUtxo,
-            });
-            psbtStart.addOutput(fixedOutput);
-
-            // Add change output if needed
+            }, tx);
+            // 添加输出
+            tx.addOutput(bitcoin.address.toOutputScript(fixedOutput.address, NETWORK), fixedOutput.value);
+            // 添加找零
             if (needChangeFeeOutput) {
-                psbtStart.addOutput({
-                    address: fundingKeypair.address,
-                    value: differenceBetweenCalculatedAndExpected,
-                });
+                tx.addOutput(bitcoin.address.toOutputScript(fundingKeypair.address, NETWORK), differenceBetweenCalculatedAndExpected);
             }
-
-            psbtStart.signInput(0, fundingKeypair.tweakedChildNode);
-            psbtStart.finalizeAllInputs();
-
-            // Extract the transaction and get its ID
-            prelimTx = psbtStart.extractTransaction();
-            const checkTxid = prelimTx.getId();
+            // 获取交易ID
+            const checkTxid = tx.getId();
 
             // Check if there is a valid proof of work
             if (
@@ -180,12 +211,23 @@ if (parentPort) {
                 )
             ) {
                 // Valid proof of work found, log success message
+                // console.log(
+                //     chalk.green(prelimTx.getId(), ` sequence: (${sequence})`)
+                // );
+
+                // console.log(
+                //     "\nBitwork matches commit txid! ",
+                //     prelimTx.getId(),
+                //     `@ time: ${Math.floor(Date.now() / 1000)}`
+                // );
+
                 console.log(
-                    chalk.green(prelimTx.getId(), ` sequence: (${sequence})`)
+                    chalk.green(tx.getId(), ` sequence: (${sequence})`)
                 );
+
                 console.log(
                     "\nBitwork matches commit txid! ",
-                    prelimTx.getId(),
+                    tx.getId(),
                     `@ time: ${Math.floor(Date.now() / 1000)}`
                 );
 
@@ -240,6 +282,7 @@ function addCommitChangeOutputIfRequired(
     // In order to keep the fee-rate unchanged, we should add extra fee for the new added change output.
     const expectedFee =
         fee.commitFeeOnly + (satsbyte as any) * OUTPUT_BYTES_BASE;
+    // console.log('expectedFee', expectedFee);
     const differenceBetweenCalculatedAndExpected = calculatedFee - expectedFee;
     if (differenceBetweenCalculatedAndExpected <= 0) {
         return;
@@ -320,7 +363,7 @@ export const appendMintUpdateRevealScript = (
     payload: AtomicalsPayload,
     log: boolean = true
 ) => {
-    let ops = `${keypair.childNodeXOnlyPubkey.toString(
+    let ops = `${Buffer.from(keypair.childNodeXOnlyPubkey, "utf8").toString(
         "hex"
     )} OP_CHECKSIG OP_0 OP_IF `;
     ops += `${Buffer.from(ATOMICALS_PROTOCOL_ENVELOPE_ID, "utf8").toString(
